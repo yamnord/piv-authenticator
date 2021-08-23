@@ -21,6 +21,10 @@ pub const PIV_TRUNCATED_AID: [u8; 9] = hex!("A000000308 00001000");
 // pub const PIV_AID: &[u8] = &hex!("A000000308 00001000 0100");
 pub const PIV_AID: iso7816::Aid = iso7816::Aid::new_truncatable(&hex!("A000000308 00001000 0100"), 9);
 
+// RID A63 = RSA Laboratories, PIX = b'PKCS-15'
+pub const PKCS15_HISTORICAL_AID: iso7816::Aid = iso7816::Aid::new(&hex!("A000000063 504B43532D3135"));
+pub const PKCS15_ISO_AID: iso7816::Aid = iso7816::Aid::new(&hex!("E8 28 BD 08 0F"));
+
 pub const DERIVED_PIV_AID: [u8; 11] = hex!("A000000308 00002000 0100");
 
 pub const APPLICATION_LABEL: &[u8] = b"SoloKeys PIV";
