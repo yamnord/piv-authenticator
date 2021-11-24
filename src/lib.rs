@@ -1,4 +1,10 @@
+// © 2020 The SoloKeys Authors <https://solokeys.dev>
+// © 2021 yamnord GmbH <hello@yamnord.com>
+// SPDX-License-Identifier: MIT
+
 #![cfg_attr(not(test), no_std)]
+// remove again
+#![allow(dead_code)]
 
 #[macro_use]
 extern crate delog;
@@ -35,14 +41,12 @@ pub type Result = iso7816::Result<()>;
 /// The `C` parameter is necessary, as PIV includes command sequences,
 /// where we need to store the previous command, so we need to know how
 /// much space to allocate.
-pub struct Authenticator<T, const C: usize>
-{
+pub struct Authenticator<T, const C: usize> {
     state: state::State<C>,
     trussed: T,
 }
 
-impl<T, const C: usize> iso7816::App for Authenticator<T, C>
-{
+impl<T, const C: usize> iso7816::App for Authenticator<T, C> {
     fn aid(&self) -> iso7816::Aid {
         crate::constants::PIV_AID
     }
@@ -52,19 +56,9 @@ impl<T, const C: usize> Authenticator<T, C>
 where
     T: client::Client + client::Ed255 + client::Tdes,
 {
-    pub fn new(
-        trussed: T,
-    )
-        -> Self
-    {
-        // seems like RefCell is not the right thing, we want something like `Rc` instead,
-        // which can be cloned and injected into other parts of the App that use Trussed.
-        // let trussed = RefCell::new(trussed);
-        Self {
-            // state: state::State::new(trussed.clone()),
-            state: Default::default(),
-            trussed,
-        }
+    pub fn new(trussed: T) -> Self {
+        info_now!("creating PIV authenticator struct");
+        Self { state: Default::default(), trussed }
     }
 
     // TODO: we'd like to listen on multiple AIDs.
@@ -74,24 +68,29 @@ where
 
     pub fn select<const R: usize>(&mut self, _apdu: &iso7816::Command<C>, reply: &mut Data<R>) -> Result
     {
-        use piv_types::Algorithms::*;
-        info_now!("selecting PIV maybe");
+        use piv_types::Algorithm::*;
+        info_now!("-> {:?}", &_apdu);
 
         let application_property_template = piv_types::ApplicationPropertyTemplate::default()
             .with_application_label(APPLICATION_LABEL)
             .with_application_url(APPLICATION_URL)
             .with_supported_cryptographic_algorithms(&[
                 Tdes,
+                Aes128,
+                Aes192,
                 Aes256,
-                P256,
                 Ed255,
+                P256,
+                // P384,
+                // Rsa1k,
+                // Rsa2k,
                 X255,
             ]);
 
         application_property_template
             .encode_to_heapless_vec(reply)
             .unwrap();
-        info_now!("returning: {}", hex_str!(reply));
+        info_now!("<- {}", hex_str!(&reply));
         Ok(())
     }
 
@@ -128,15 +127,27 @@ where
         };
 
         // parse Iso7816Command as PivCommand
-        let command: Command = (&entire_command).try_into()?;
-        info_now!("parsed: {:?}", &command);
+        let command: Command = (&entire_command).try_into()
+            .map_err(|e| {
+                info_now!("-> {:?}", &entire_command);
+                info_now!("<- {:?}", e);
+                e
+            })?;
+        info_now!("-> {:?}", &command);
 
-        match command {
+        let response = match command {
             Command::Verify(verify) => self.verify(verify),
             Command::ChangeReference(change_reference) => self.change_reference(change_reference),
             Command::GetData(container) => self.get_data(container, reply),
-            _ => todo!(),
+            // TODO
+            _ => Err(Status::FunctionNotSupported),
+        };
+        if let Err(_error) = response {
+            info_now!("<- {:?}", _error);
+        } else {
+            info_now!("<- {}", hex_str!(&reply));
         }
+        response
     }
 
     // maybe reserve this for the case VerifyLogin::PivPin?
@@ -925,7 +936,6 @@ where
                 piv_types::CardCapabilityContainer::default()
                     .encode_to_heapless_vec(reply)
                     .unwrap();
-                info_now!("returning CCC {}", hex_str!(reply));
             }
 
             // '5FC1 02' (351B)
@@ -935,7 +945,6 @@ where
                     .with_guid(guid)
                     .encode_to_heapless_vec(reply)
                     .unwrap();
-                info_now!("returning CHUID {}", hex_str!(reply));
             }
 
             // // '5FC1 05' (351B)
@@ -970,6 +979,7 @@ where
 
             _ => return Err(Status::NotFound),
         }
+        // info_now!("<- {}", hex_str!(reply));
         Ok(())
     }
 

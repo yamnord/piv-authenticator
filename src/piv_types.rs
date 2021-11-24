@@ -51,34 +51,48 @@ impl TryFrom<&[u8]> for Puk {
 }
 
 #[repr(u8)]
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 // As additional reference, see:
 // https://globalplatform.org/wp-content/uploads/2014/03/GPC_ISO_Framework_v1.0.pdf#page=15
 //
 // This GP ISO standard contains PIV types as subset (although SM is not quite clear),
 // references Opacity ZKM.
-pub enum Algorithms {
+pub enum Algorithm {
+    // Default = 0x0, // - maps to TDES \o/
+    // TwoDesEcb = 0x1,
+    // TwoDesCbc = 0x2,
     Tdes = 0x3,
+    // TdesCbc = 0x4,
+    // early PIV contains this
+    Rsa3k = 0x5,
     Rsa1k = 0x6,
     Rsa2k = 0x7,
+    // meaning ECB
     Aes128 = 0x8,
+    // Aes128Cbc = 0x9,
     Aes192 = 0xA,
+    // Aes192Cbc = 0xB,
     Aes256 = 0xC,
+    // Aes256Cbc = 0xD,
+    // P224 = 0xE,
+    // K233 = 0xF,
+    // B233 = 0x10,
     P256 = 0x11,
+    // K233 = 0x12,
+    // B233 = 0x13,
     P384 = 0x14,
+    // https://globalplatform.org/wp-content/uploads/2014/03/GPC_ISO_Framework_v1.0.pdf#page=15
+    P521 = 0x15,
 
     // // non-standard! in piv-go though!
     // Ed255_prev = 0x22,
 
-    // https://globalplatform.org/wp-content/uploads/2014/03/GPC_ISO_Framework_v1.0.pdf#page=15
-    P521 = 0x15,
     // non-standard!
-    Rsa3k = 0xE0,
-    Rsa4k = 0xE1,
-    Ed255 = 0xE2,
-    X255 = 0xE3,
-    Ed448 = 0xE4,
-    X448 = 0xE5,
+    Rsa4k = 0xE0,
+    Ed255 = 0xE1,
+    X255 = 0xE2,
+    Ed448 = 0xE3,
+    X448 = 0xE4,
 
     // non-standard! picked by Alex, but maybe due for removal
     P256Sha1 = 0xF0,
@@ -88,10 +102,42 @@ pub enum Algorithms {
     P384Sha384 = 0xF4,
 }
 
+impl TryFrom<u8> for Algorithm {
+    type Error = ();
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
+        use Algorithm::*;
+        Ok(match byte {
+            // 0 = "default",maps to TDES
+            0x00 => Tdes,
+            0x03 => Tdes,
+            0x05 => Rsa3k,
+            0x06 => Rsa1k,
+            0x07 => Rsa2k,
+            0x08 => Aes128,
+            0x0A => Aes192,
+            0x0c => Aes256,
+            0x11 => P256,
+            0x14 => P384,
+            0x15 => P521,
+            0xE0 => Rsa4k,
+            0xE1 => X255,
+            0xE2 => Ed255,
+            0xE3 => X448,
+            0xE4 => Ed448,
+            0xF0 => P256Sha1,
+            0xF1 => P256Sha256,
+            0xF2 => P384Sha1,
+            0xF3 => P384Sha256,
+            0xF4 => P384Sha384,
+            _ => return Err(()),
+        })
+    }
+}
+
 /// TODO:
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 pub struct CryptographicAlgorithmTemplate<'a> {
-    pub algorithms: &'a [Algorithms],
+    pub algorithms: &'a [Algorithm],
 }
 
 impl Encodable for CryptographicAlgorithmTemplate<'_> {
@@ -179,7 +225,7 @@ impl<'a> ApplicationPropertyTemplate<'a> {
         }
     }
 
-    pub const fn with_supported_cryptographic_algorithms(self, supported_cryptographic_algorithms: &'a [Algorithms]) -> Self {
+    pub const fn with_supported_cryptographic_algorithms(self, supported_cryptographic_algorithms: &'a [Algorithm]) -> Self {
         Self {
             aid: self.aid,
             application_label: self.application_label,

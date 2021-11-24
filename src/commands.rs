@@ -3,14 +3,16 @@
 //! The types here should enforce all restrictions in the spec (such as padded_piv_pin.len() == 8),
 //! but no implementation-specific ones (such as "GlobalPin not supported").
 
-use core::convert::{TryFrom, TryInto};
+use core::{convert::{TryFrom, TryInto}, fmt};
 
 // use flexiber::Decodable;
+use flexiber::{SimpleTag, Tag, TaggedSlice};
 use iso7816::{Instruction, Status};
 
 pub use crate::{container as containers, piv_types, Pin, Puk};
+use piv_types::Algorithm;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, /*Copy,*/ Debug, Eq, PartialEq)]
 pub enum Command<'l> {
     /// Select the application
     ///
@@ -32,10 +34,10 @@ pub enum Command<'l> {
     /// The most general purpose method, performing actual cryptographic operations
     ///
     /// In particular, this can also decrypt or similar.
-    Authenticate(Authenticate),
+    Authenticate(Authenticate<'l>),
     /// Store a data object / container.
-    PutData(PutData),
-    GenerateAsymmetric(GenerateAsymmetric),
+    PutData(PutData<'l>),
+    GenerateAsymmetric(GenerateAsymmetric<'l>),
 }
 
 impl<'l> Command<'l> {
@@ -82,7 +84,6 @@ impl TryFrom<&[u8]> for GetData {
             .try_into()
             .map_err(|_| Status::IncorrectDataParameter)?;
 
-        info_now!("request to GetData for container {:?}", container);
         Ok(Self(container))
     }
 }
@@ -320,25 +321,129 @@ pub struct AuthenticateArguments<'l> {
     pub data: &'l [u8],
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Authenticate {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub enum AuthenticateObject<'l> {
+    Witness(&'l [u8]),
+    Challenge(&'l [u8]),
+    Response(&'l [u8]),
+    Exponentiation(&'l [u8]),
 }
 
-impl TryFrom<AuthenticateArguments<'_>> for Authenticate {
+impl<'l> fmt::Debug for AuthenticateObject<'l> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use AuthenticateObject::*;
+        let (name, data) = match self {
+            Witness(data) => ("Witness", data),
+            Challenge(data) => ("Challenge", data),
+            Response(data) => ("Reponse", data),
+            Exponentiation(data) => ("Exponentiation", data),
+        };
+
+        let mut builder = f.debug_tuple(name);
+        builder.field(&format_args!("'{}'", hex_str!(data)));
+        builder.finish()
+    }
+}
+
+impl<'l> TryFrom<TaggedSlice<'l>> for AuthenticateObject<'l> {
+    type Error = ();
+    fn try_from(tagged_slice: TaggedSlice<'l>) -> Result<Self, Self::Error> {
+        use AuthenticateObject::*;
+        let data = tagged_slice.as_bytes();
+        // info_now!("authenticate object tag number: {}", tagged_slice.tag().number);
+        let tag = tagged_slice.tag();
+        // a bit abuse... we're dealing with SimpleTag, but checking interpretation as BER Tag
+        if tag.class != flexiber::Class::Context || tag.constructed {
+            return Err(());
+        }
+        Ok(match tagged_slice.tag().number {
+            0x0 => Witness(data),
+            0x1 => Challenge(data),
+            0x2 => Response(data),
+            0x5 => Exponentiation(data),
+            _ => return Err(()),
+        })
+    }
+}
+
+pub const MAX_AUTHENTICATE_OBJECTS: usize = 4;
+pub type AuthenticateObjects<'l> = heapless::Vec<AuthenticateObject<'l>, MAX_AUTHENTICATE_OBJECTS>;
+
+#[derive(Clone, /*Copy,*/ Debug, Eq, PartialEq)]
+pub struct Authenticate<'l> {
+    pub algorithm: Algorithm,
+    pub key_reference: AuthenticateKeyReference,
+    pub objects: AuthenticateObjects<'l>,
+}
+
+impl<'l> TryFrom<AuthenticateArguments<'l>> for Authenticate<'l> {
     type Error = Status;
-    fn try_from(_arguments: AuthenticateArguments<'_>) -> Result<Self, Self::Error> {
-        todo!();
+    fn try_from(arguments: AuthenticateArguments<'l>) -> Result<Self, Self::Error> {
+        let algorithm = Algorithm::try_from(arguments.unparsed_algorithm)
+            .map_err(|_| Status::IncorrectP1OrP2Parameter)?;
+        let key_reference = arguments.key_reference;
+
+        // info_now!("decoding: '{}'", hex_str!(arguments.data));
+        let mut decoder = flexiber::Decoder::new(arguments.data);
+        let data = decoder
+            // '7C'
+            .decode_tagged_slice(flexiber::Tag::application(0x1C).constructed())
+            .map_err(|_| Status::IncorrectDataParameter)?;
+        // info_now!("remaining data: '{}'", hex_str!(data));
+
+        // now we can have a an array of data objects
+        let mut objects = AuthenticateObjects::new();
+        let mut decoder = flexiber::Decoder::new(data);
+
+        while !decoder.is_finished() {
+            let object: flexiber::TaggedSlice = decoder.decode()
+                .map_err(|_| Status::IncorrectDataParameter)?;
+            // info_now!("candidate object: {}, '{}'", object.tag(), hex_str!(object.as_bytes()));
+            objects.push(object.try_into()
+                         .map_err(|_| Status::IncorrectDataParameter)?)
+                .map_err(|_| Status::NotEnoughMemory)?;
+        }
+
+        Ok(Self { algorithm, key_reference, objects })
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PutData {
+pub struct PutData<'l> {
+    tag: Tag,
+    data: &'l [u8],
 }
 
-impl TryFrom<&[u8]> for PutData {
+impl<'l> TryFrom<&'l [u8]> for PutData<'l> {
     type Error = Status;
-    fn try_from(_data: &[u8]) -> Result<Self, Self::Error> {
-        todo!();
+    fn try_from(data: &'l [u8]) -> Result<Self, Self::Error> {
+        let mut decoder = flexiber::Decoder::new(data);
+
+        // case 1: 0x7E Discovery Object
+        if decoder.decode_tagged_slice(Tag::application(0x13)).is_ok() {
+            // PivApplet doesn't support setting DiscoveryObject either
+            return Err(Status::FunctionNotSupported);
+        }
+
+        // case 2: 0x7F61 BIT Group Template
+        if decoder.decode_tagged_slice(Tag::application(0x61).constructed()).is_ok() {
+            // PivApplet doesn't support setting BIT Group Template either
+            return Err(Status::FunctionNotSupported);
+        }
+
+        // case 3: all other PIV data objects
+        let tag: Tag = decoder.decode_tagged_value(
+            // '5C'
+            Tag::application(0x1C))
+            .map_err(|_| Status::IncorrectDataParameter)?;
+
+        let data = decoder.decode_tagged_slice(
+            // '53'
+            Tag::application(0x13))
+            .map_err(|_| Status::IncorrectDataParameter)?;
+
+        // TODO: maybe validate Tag is a valida PIV Data Object tag here?
+        Ok(Self { tag, data })
     }
 }
 
@@ -368,18 +473,49 @@ impl TryFrom<u8> for GenerateAsymmetricKeyReference {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GenerateAsymmetricArguments<'l> {
+    // TODO: we could allow generating keys directly in retired slots
     pub key_reference: GenerateAsymmetricKeyReference,
     pub data: &'l [u8],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GenerateAsymmetric {
+pub struct GenerateAsymmetric<'l> {
+    key_reference: GenerateAsymmetricKeyReference,
+    algorithm: Algorithm,
+    parameter: Option<&'l [u8]>,
 }
 
-impl TryFrom<GenerateAsymmetricArguments<'_>> for GenerateAsymmetric {
+impl<'l> TryFrom<GenerateAsymmetricArguments<'l>> for GenerateAsymmetric<'l> {
     type Error = Status;
-    fn try_from(_arguments: GenerateAsymmetricArguments<'_>) -> Result<Self, Self::Error> {
-        todo!();
+    fn try_from(arguments: GenerateAsymmetricArguments<'l>) -> Result<Self, Self::Error> {
+        let key_reference = arguments.key_reference;
+
+        // info_now!("getting started for {:?} with '{}'", key_reference, hex_str!(arguments.data));
+        let mut decoder = flexiber::Decoder::new(arguments.data);
+
+        let data = decoder.decode_tagged_slice(
+            // 'AC'
+            Tag::context(0xC).constructed())
+            .map_err(|_| Status::IncorrectDataParameter)?;
+
+        // info_now!("parsing '{}'", hex_str!(data));
+        let mut decoder = flexiber::Decoder::new(data);
+
+        // info_now!("tag: {:?}", Tag::context(0));
+        // info_now!("stag: {:?}", SimpleTag::of(0x80));
+        let algorithm: Algorithm = match decoder.decode_tagged_slice(SimpleTag::of(0x80))
+            .map_err(|_| Status::IncorrectDataParameter)?
+        {
+            &[x] => x.try_into().map_err(|_| Status::IncorrectDataParameter)?,
+            _other => return Err(Status::IncorrectDataParameter),
+        };
+
+        // info_now!("got algorithm: {:?}", algorithm);
+        let parameter = decoder.decode_tagged_slice(SimpleTag::of(0x81))
+            // not quite right - silently removes existing parameters that are malformed
+            .ok();
+
+        Ok(Self { key_reference, algorithm, parameter })
     }
 }
 

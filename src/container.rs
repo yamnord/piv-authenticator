@@ -1,5 +1,5 @@
 use core::convert::TryFrom;
-use flexiber::{Decodable, Encodable};
+// use flexiber::{Decodable, Encodable};
 
 pub struct Tag<'a>(&'a [u8]);
 impl<'a> Tag<'a> {
@@ -163,6 +163,7 @@ impl TryFrom<Tag<'_>> for Container {
             hex!("5FC10B") => X509CertificateFor9D,
             hex!("5FC109") => PrintedInformation,
             hex!("7E") => DiscoveryObject,
+            hex!("5FC10C") => KeyHistoryObject,
 
             hex!("5FC10D") => RetiredX509Certificate(RetiredIndex(1)),
             hex!("5FC10E") => RetiredX509Certificate(RetiredIndex(2)),
